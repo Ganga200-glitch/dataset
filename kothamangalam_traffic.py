@@ -58,7 +58,12 @@ def compute_congestion_index(free_flow_speed, current_speed):
 def main():
 
     # 🔐 Initialize Firebase
-    cred = credentials.Certificate("firebase-key.json")
+    import json
+
+    firebase_key_json = os.getenv("FIREBASE_KEY")
+    firebase_key_dict = json.loads(firebase_key_json)
+
+    cred = credentials.Certificate(firebase_key_dict)
 
     firebase_admin.initialize_app(cred, {
         'databaseURL': 'https://kothamangalam-traffic.firebaseio.com/'
