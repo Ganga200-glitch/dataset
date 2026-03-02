@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""
-Collects real-time traffic flow data from TomTom for three Kothamangalam locations
-and appends rows to kothamangalam_traffic_dataset.csv.
 
-Usage:
- - Set environment variable TOMTOM_API_KEY or the script will prompt for it.
- - Run: python kothamangalam_traffic.py
-"""
 import os
-import csv
+import time
 import requests
 from datetime import datetime
+import firebase_admin
+from firebase_admin import credentials, db
 
-CSV_FILE = "kothamangalam_traffic_dataset.csv"
+# ------------------------------
+# CONFIGURATION
+# ------------------------------
+
 BASE_URL = "https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json"
 
 LOCATIONS = {
@@ -21,95 +19,95 @@ LOCATIONS = {
     "Market Area": (10.060950, 76.626500),
 }
 
+# ------------------------------
+# GET API KEY
+# ------------------------------
 
 def get_api_key():
     key = os.getenv("TOMTOM_API_KEY")
     if key:
         return key
-    try:
-        # fallback: prompt the user
-        return input("Enter your TomTom API key: ").strip()
-    except Exception:
-        return None
+    return input("Enter your TomTom API key: ").strip()
 
+# ------------------------------
+# FETCH TRAFFIC DATA
+# ------------------------------
 
 def fetch_flow(lat, lon, api_key):
-    params = {"point": f"{lat},{lon}", "key": api_key}
-    resp = requests.get(BASE_URL, params=params, timeout=10)
-    resp.raise_for_status()
-    return resp.json()
+    params = {
+        "point": f"{lat},{lon}",
+        "key": api_key
+    }
+    response = requests.get(BASE_URL, params=params, timeout=10)
+    response.raise_for_status()
+    return response.json()
 
-
-def parse_flow(json_data):
-    flow = json_data.get("flowSegmentData", {})
-    current_speed = flow.get("currentSpeed")
-    free_flow_speed = flow.get("freeFlowSpeed")
-    current_travel_time = flow.get("currentTravelTime")
-    confidence = flow.get("confidence")
-    return current_speed, free_flow_speed, current_travel_time, confidence
-
+# ------------------------------
+# CALCULATE CONGESTION
+# ------------------------------
 
 def compute_congestion_index(free_flow_speed, current_speed):
-    try:
-        if free_flow_speed and free_flow_speed > 0:
-            return (free_flow_speed - current_speed) / free_flow_speed
-    except Exception:
-        pass
+    if free_flow_speed and free_flow_speed > 0:
+        return (free_flow_speed - current_speed) / free_flow_speed
     return 0.0
 
-
-def ensure_csv_header(path):
-    if not os.path.exists(path):
-        with open(path, mode="w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["timestamp", "location", "current_speed", "free_flow_speed", "congestion_index", "confidence"])
-
-
-def append_row(path, row):
-    with open(path, mode="a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(row)
-
+# ------------------------------
+# MAIN PROGRAM
+# ------------------------------
 
 def main():
+
+    # 🔐 Initialize Firebase
+    cred = credentials.Certificate("firebase-key.json")
+
+    firebase_admin.initialize_app(cred, {
+        'databaseURL': 'https://kothamangalam-traffic.firebaseio.com/'
+    })
+
+    ref = db.reference("traffic_data")
+
     api_key = get_api_key()
     if not api_key:
-        print("No TomTom API key provided. Set TOMTOM_API_KEY or provide one when prompted.")
+        print("No API key provided.")
         return
 
-    ensure_csv_header(CSV_FILE)
+    print("Traffic collector started...")
 
-    for name, (lat, lon) in LOCATIONS.items():
-        timestamp = datetime.utcnow().isoformat()
-        try:
-            data = fetch_flow(lat, lon, api_key)
-            current_speed, free_flow_speed, _, confidence = parse_flow(data)
-
-            # Ensure numeric values
-            if current_speed is None:
-                current_speed = 0.0
-            if free_flow_speed is None:
-                free_flow_speed = 0.0
+    while True:
+        for name, (lat, lon) in LOCATIONS.items():
             try:
-                current_speed = float(current_speed)
-            except Exception:
-                current_speed = 0.0
-            try:
-                free_flow_speed = float(free_flow_speed)
-            except Exception:
-                free_flow_speed = 0.0
+                timestamp = datetime.utcnow().isoformat()
 
-            congestion_index = compute_congestion_index(free_flow_speed, current_speed)
+                data = fetch_flow(lat, lon, api_key)
+                flow = data.get("flowSegmentData", {})
 
-            row = [timestamp, name, current_speed, free_flow_speed, congestion_index, confidence]
-            append_row(CSV_FILE, row)
-            print(f"Saved row for '{name}' at {timestamp}")
-        except requests.HTTPError as e:
-            print(f"HTTP error for {name} ({lat},{lon}): {e}")
-        except requests.RequestException as e:
-            print(f"Request error for {name} ({lat},{lon}): {e}")
-        except Exception as e:
-            print(f"Unexpected error for {name} ({lat},{lon}): {e}")
+                current_speed = float(flow.get("currentSpeed", 0))
+                free_flow_speed = float(flow.get("freeFlowSpeed", 0))
+                confidence = flow.get("confidence", 0)
+
+                congestion_index = compute_congestion_index(
+                    free_flow_speed,
+                    current_speed
+                )
+
+                upload_data = {
+                    "timestamp": timestamp,
+                    "location": name,
+                    "current_speed": current_speed,
+                    "free_flow_speed": free_flow_speed,
+                    "congestion_index": congestion_index,
+                    "confidence": confidence
+                }
+
+                ref.push(upload_data)
+
+                print(f"Uploaded data for {name} at {timestamp}")
+
+            except Exception as e:
+                print(f"Error for {name}: {e}")
+
+        print("Sleeping 15 minutes...\n")
+        time.sleep(900)  # 15 minutes
 
 
 if __name__ == "__main__":
