@@ -2,13 +2,26 @@
 
 import os
 import time
+import json
+import threading
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
+from flask import Flask
 import firebase_admin
 from firebase_admin import credentials, db
 
 # ------------------------------
-# CONFIGURATION
+# FLASK APP (REQUIRED FOR RENDER)
+# ------------------------------
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Traffic Collector Running ✅"
+
+# ------------------------------
+# CONFIG
 # ------------------------------
 
 BASE_URL = "https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json"
@@ -20,80 +33,50 @@ LOCATIONS = {
 }
 
 # ------------------------------
-# GET API KEY
+# INITIALIZE FIREBASE
 # ------------------------------
 
-def get_api_key():
-    key = os.getenv("TOMTOM_API_KEY")
-    if key:
-        return key
-    return input("Enter your TomTom API key: ").strip()
-
-# ------------------------------
-# FETCH TRAFFIC DATA
-# ------------------------------
-
-def fetch_flow(lat, lon, api_key):
-    params = {
-        "point": f"{lat},{lon}",
-        "key": api_key
-    }
-    response = requests.get(BASE_URL, params=params, timeout=10)
-    response.raise_for_status()
-    return response.json()
-
-# ------------------------------
-# CALCULATE CONGESTION
-# ------------------------------
-
-def compute_congestion_index(free_flow_speed, current_speed):
-    if free_flow_speed and free_flow_speed > 0:
-        return (free_flow_speed - current_speed) / free_flow_speed
-    return 0.0
-
-# ------------------------------
-# MAIN PROGRAM
-# ------------------------------
-
-def main():
-
-    # 🔐 Initialize Firebase
-    import json
-
+def initialize_firebase():
     firebase_key_json = os.getenv("FIREBASE_KEY")
     firebase_key_dict = json.loads(firebase_key_json)
 
     cred = credentials.Certificate(firebase_key_dict)
 
     firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://kothamangalam-traffic.firebaseio.com/'
+        'databaseURL': 'https://kothamangalam-traffic-default-rtdb.firebaseio.com/'
     })
 
-    ref = db.reference("traffic_data")
+# ------------------------------
+# TRAFFIC COLLECTOR LOOP
+# ------------------------------
 
-    api_key = get_api_key()
-    if not api_key:
-        print("No API key provided.")
-        return
+def traffic_collector():
+    api_key = os.getenv("TOMTOM_API_KEY")
+    ref = db.reference("traffic_data")
 
     print("Traffic collector started...")
 
     while True:
         for name, (lat, lon) in LOCATIONS.items():
             try:
-                timestamp = datetime.utcnow().isoformat()
+                timestamp = datetime.now(timezone.utc).isoformat()
 
-                data = fetch_flow(lat, lon, api_key)
+                params = {
+                    "point": f"{lat},{lon}",
+                    "key": api_key
+                }
+
+                response = requests.get(BASE_URL, params=params)
+                data = response.json()
                 flow = data.get("flowSegmentData", {})
 
                 current_speed = float(flow.get("currentSpeed", 0))
                 free_flow_speed = float(flow.get("freeFlowSpeed", 0))
                 confidence = flow.get("confidence", 0)
 
-                congestion_index = compute_congestion_index(
-                    free_flow_speed,
-                    current_speed
-                )
+                congestion_index = 0.0
+                if free_flow_speed > 0:
+                    congestion_index = (free_flow_speed - current_speed) / free_flow_speed
 
                 upload_data = {
                     "timestamp": timestamp,
@@ -106,14 +89,28 @@ def main():
 
                 ref.push(upload_data)
 
-                print(f"Uploaded data for {name} at {timestamp}")
+                print(f"Uploaded data for {name}")
 
             except Exception as e:
-                print(f"Error for {name}: {e}")
+                print(f"Error: {e}")
 
-        print("Sleeping 15 minutes...\n")
-        time.sleep(900)  # 15 minutes
+        print("Sleeping 15 minutes...")
+        time.sleep(900)
 
+
+# ------------------------------
+# START EVERYTHING
+# ------------------------------
 
 if __name__ == "__main__":
-    main()
+
+    initialize_firebase()
+
+    # Start background thread
+    thread = threading.Thread(target=traffic_collector)
+    thread.daemon = True
+    thread.start()
+
+    # Run Flask app (Render needs this)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
